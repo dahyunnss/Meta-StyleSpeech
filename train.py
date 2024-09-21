@@ -1,6 +1,5 @@
 import argparse
 import os
-
 import torch
 import yaml
 import torch.nn as nn
@@ -30,14 +29,14 @@ def backward(model, optimizer, total_loss, step, grad_acc_step, grad_clip_thresh
         optimizer.zero_grad()
 
 
-def main(args, configs):
+def main(args, configs, val_config=None):
     print("Prepare training ...")
 
     preprocess_config, model_config, train_config = configs
 
     # Get dataset
     dataset = Dataset(
-        "train_filtered.txt", preprocess_config, train_config, sort=True, drop_last=True
+        "train.txt", preprocess_config, train_config, sort=True, drop_last=True
     )
     batch_size = train_config["optimizer"]["batch_size"]
     group_size = 4  # Set this larger than 1 to enable sorting in Dataset
@@ -47,11 +46,13 @@ def main(args, configs):
         batch_size=batch_size * group_size,
         shuffle=True,
         collate_fn=dataset.collate_fn,
+        #num_workers=8
     )
 
     # Prepare model
     model, optimizer_main, optimizer_disc = get_model(args, configs, device, train=True)
     model = nn.DataParallel(model)
+    #model.to(device)
     num_param = get_param_num(model)
     Loss_1 = MetaStyleSpeechLossMain(preprocess_config, model_config, train_config).to(device)
     Loss_2 = MetaStyleSpeechLossDisc(preprocess_config, model_config).to(device)
@@ -73,14 +74,14 @@ def main(args, configs):
     # Training
     step = args.restore_step + 1
     epoch = 1
-    meta_learning_warmup = train_config["step"]["meta_learning_warmup"]
-    grad_acc_step = train_config["optimizer"]["grad_acc_step"]
-    grad_clip_thresh = train_config["optimizer"]["grad_clip_thresh"]
-    total_step = train_config["step"]["total_step"]
-    log_step = train_config["step"]["log_step"]
-    save_step = train_config["step"]["save_step"]
-    synth_step = train_config["step"]["synth_step"]
-    val_step = train_config["step"]["val_step"]
+    meta_learning_warmup = train_config["step"]["meta_learning_warmup"] 
+    grad_acc_step = train_config["optimizer"]["grad_acc_step"] 
+    grad_clip_thresh = train_config["optimizer"]["grad_clip_thresh"] 
+    total_step = train_config["step"]["total_step"] 
+    log_step = train_config["step"]["log_step"] 
+    save_step = train_config["step"]["save_step"] 
+    synth_step = train_config["step"]["synth_step"] 
+    val_step = train_config["step"]["val_step"] 
 
     outer_bar = tqdm(total=total_step, desc="Training", position=0)
     outer_bar.n = args.restore_step
@@ -88,24 +89,25 @@ def main(args, configs):
 
     while True:
         inner_bar = tqdm(total=len(loader), desc="Epoch {}".format(epoch), position=1)
-        for batchs in loader:
-            for batch in batchs:
+        #배치 그룹에서 개별 배치(1396개)처리
+        for batchs in loader: 
+            for batch in batchs: # 각 그룹 내 개별 배치(64개) 처리
                 batch = to_device(batch, device)
 
                 # Warm-up Stage
-                if step <= meta_learning_warmup:
-                    # Forward
+                if step <= meta_learning_warmup: #step이 35000이하 >> 일반 학습 모드 (메타 학습은 포함되 지 않음) 
+                    # Forward :모델에 배치를 전달하고 출력을 계산
                     output = (None, None, *model(*(batch[2:-5])))
                 # Meta Learning
                 else:
                     # Step 1: Update Enc_s and G
                     output = model.module.meta_learner_1(*(batch[2:]))
 
-                # Cal Loss
+                # Cal Loss : 손실을 계산하여 학습에 사용
                 losses_1 = Loss_1(batch, output)
                 total_loss = losses_1[0]
 
-                # Backward
+                # Backward : 손실을 기반으로 그라디언트를 역전파하고 모델의 가중치를 업데이트
                 backward(model, optimizer_main, total_loss, step, grad_acc_step, grad_clip_thresh)
 
                 # Meta Learning
@@ -113,15 +115,18 @@ def main(args, configs):
                     # Step 2: Update D_t and D_s
                     output_disc = model.module.meta_learner_2(*(batch[2:]))
 
+                    # 메타 러너를 위한 추가 손실 계산
                     losses_2 = Loss_2(batch[2], output_disc)
                     total_loss_disc = losses_2[0]
 
+                    # 역전파를 통해 옵티마이저를 사용하여 손실 기반의 가중치 업데이트
                     backward(model, optimizer_disc, total_loss_disc, step, grad_acc_step, grad_clip_thresh)
 
                 if step % log_step == 0:
+                    # 메타 학습 이후 단계에서는 추가적인 손실이 더해짐
                     if step > meta_learning_warmup:
                         losses = [l.item() for l in (losses_1+losses_2[1:])]
-                    else:
+                    else: # 메타 러닝 전 단계에서는 기본 손실만 기록
                         losses = [l.item() for l in (losses_1+tuple([torch.zeros(1).to(device) for _ in range(3)]))]
                     message1 = "Step {}/{}, ".format(step, total_step)
                     message2 = "Total Loss: {:.4f}, Mel Loss: {:.4f}, Pitch Loss: {:.4f}, Energy Loss: {:.4f}, Duration Loss: {:.4f}, Adversarial_D_s Loss: {:.4f}, Adversarial_D_t Loss: {:.4f}, D_s Loss: {:.4f}, D_t Loss: {:.4f}, cls Loss: {:.4f}".format(
@@ -135,6 +140,7 @@ def main(args, configs):
 
                     log(train_logger, step, losses=losses)
 
+                # 합성 스텝에 도달하면 샘플 데이터를 합성하고 기록
                 if step % synth_step == 0:
                     fig, wav_reconstruction, wav_prediction, tag = synth_one_sample(
                         batch,
@@ -164,9 +170,10 @@ def main(args, configs):
                         tag="Training/step_{}_{}_synthesized".format(step, tag),
                     )
 
+                # 검증 스텝에 도달하면 검증 데이터셋으로 모델을 평가하고 로그
                 if step % val_step == 0:
                     model.eval()
-                    message = evaluate(model, step, configs, val_logger, vocoder, len(losses))
+                    message = evaluate(model, step, configs, val_logger, vocoder, len(losses), val_config=val_config)
                     with open(os.path.join(val_log_path, "log.txt"), "a") as f:
                         f.write(message + "\n")
                     outer_bar.write(message)
@@ -211,6 +218,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "-t", "--train_config", type=str, required=True, help="path to train.yaml"
     )
+    parser.add_argument(
+        "-v", "--val_config", type=str, required=True, help="path to validation preprocess.yaml"
+    )
     args = parser.parse_args()
 
     # Read Config
@@ -220,5 +230,11 @@ if __name__ == "__main__":
     model_config = yaml.load(open(args.model_config, "r"), Loader=yaml.FullLoader)
     train_config = yaml.load(open(args.train_config, "r"), Loader=yaml.FullLoader)
     configs = (preprocess_config, model_config, train_config)
+    
+    val_config = None
+    if args.val_config:
+        val_config = yaml.load(
+            open(args.val_config, "r"), Loader=yaml.FullLoader
+        )
 
-    main(args, configs)
+    main(args, configs, val_config)
