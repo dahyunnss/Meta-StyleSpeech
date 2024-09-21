@@ -89,25 +89,24 @@ def main(args, configs, val_config=None):
 
     while True:
         inner_bar = tqdm(total=len(loader), desc="Epoch {}".format(epoch), position=1)
-        #배치 그룹에서 개별 배치(1396개)처리
         for batchs in loader: 
             for batch in batchs: # 각 그룹 내 개별 배치(64개) 처리
                 batch = to_device(batch, device)
 
                 # Warm-up Stage
                 if step <= meta_learning_warmup: #step이 35000이하 >> 일반 학습 모드 (메타 학습은 포함되 지 않음) 
-                    # Forward :모델에 배치를 전달하고 출력을 계산
+                    # Forward 
                     output = (None, None, *model(*(batch[2:-5])))
                 # Meta Learning
                 else:
                     # Step 1: Update Enc_s and G
                     output = model.module.meta_learner_1(*(batch[2:]))
 
-                # Cal Loss : 손실을 계산하여 학습에 사용
+                # Cal Loss 
                 losses_1 = Loss_1(batch, output)
                 total_loss = losses_1[0]
 
-                # Backward : 손실을 기반으로 그라디언트를 역전파하고 모델의 가중치를 업데이트
+                # Backward
                 backward(model, optimizer_main, total_loss, step, grad_acc_step, grad_clip_thresh)
 
                 # Meta Learning
@@ -119,7 +118,6 @@ def main(args, configs, val_config=None):
                     losses_2 = Loss_2(batch[2], output_disc)
                     total_loss_disc = losses_2[0]
 
-                    # 역전파를 통해 옵티마이저를 사용하여 손실 기반의 가중치 업데이트
                     backward(model, optimizer_disc, total_loss_disc, step, grad_acc_step, grad_clip_thresh)
 
                 if step % log_step == 0:
@@ -140,7 +138,6 @@ def main(args, configs, val_config=None):
 
                     log(train_logger, step, losses=losses)
 
-                # 합성 스텝에 도달하면 샘플 데이터를 합성하고 기록
                 if step % synth_step == 0:
                     fig, wav_reconstruction, wav_prediction, tag = synth_one_sample(
                         batch,
@@ -170,7 +167,6 @@ def main(args, configs, val_config=None):
                         tag="Training/step_{}_{}_synthesized".format(step, tag),
                     )
 
-                # 검증 스텝에 도달하면 검증 데이터셋으로 모델을 평가하고 로그
                 if step % val_step == 0:
                     model.eval()
                     message = evaluate(model, step, configs, val_logger, vocoder, len(losses), val_config=val_config)
