@@ -11,7 +11,6 @@ PyTorch Implementation of [Meta-StyleSpeech : Multi-Speaker Adaptive Text-to-Spe
 </p>
 
 # Branch
-- [x] StyleSpeech (`naive` branch)
 - [x] Meta-StyleSpeech (`main` branch)
 
 # Quickstart
